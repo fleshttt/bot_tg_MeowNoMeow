@@ -1,0 +1,16 @@
+.git
+.gitignore
+__pycache__
+*.pyc
+*.pyo
+.env
+.env.*
+*.db
+venv
+.venv
+*.log
+*.png
+dikidi_parsed*.json
+dikidi_result.json
+PARSER_SETUP.md
+.cursor
