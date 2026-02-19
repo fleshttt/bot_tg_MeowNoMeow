@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Boolean, Text
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Boolean, Text, UniqueConstraint
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from bot.database.database import Base
@@ -52,7 +52,8 @@ class Appointment(Base):
 
 class Notification(Base):
     __tablename__ = "notifications"
-    
+    __table_args__ = (UniqueConstraint("appointment_id", "type", name="uq_notification_appointment_type"),)
+
     id = Column(Integer, primary_key=True, index=True)
     appointment_id = Column(Integer, ForeignKey("appointments.id"), nullable=False)
     type = Column(String, nullable=False)  # created / changed / canceled / reminder / after_visit / confirmation

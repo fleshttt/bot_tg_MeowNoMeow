@@ -5,8 +5,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bot.database.database import get_session
 from bot.services.dikidi_parser import DikidiParser
 from bot.services.notifications import NotificationService
-from bot.models.models import Appointment
-from sqlalchemy import select
+from bot.models.models import Appointment, Notification
+from sqlalchemy import select, exists, and_
 from aiogram import Bot
 import logging
 
@@ -28,13 +28,20 @@ class SchedulerService:
                 stats = await self.parser.sync_appointments(session)
                 logger.info(f"Синхронизация с Dikidi: создано {stats['created']}, изменено {stats['changed']}, отменено {stats['canceled']}")
                 
-                # Получаем новые, изменённые и отменённые записи
+                # Только записи БЕЗ уже созданного уведомления этого типа (created/changed/canceled)
+                has_notification = exists().where(
+                    Notification.appointment_id == Appointment.id,
+                    Notification.type == Appointment.status
+                )
                 result = await session.execute(
                     select(Appointment).where(
-                        Appointment.status.in_(["created", "changed", "canceled"])
+                        and_(
+                            Appointment.status.in_(["created", "changed", "canceled"]),
+                            ~has_notification
+                        )
                     )
                 )
-                appointments = result.scalars().all()
+                appointments = result.scalars().unique().all()
                 
                 # Планируем уведомления для каждой записи
                 for appointment in appointments:

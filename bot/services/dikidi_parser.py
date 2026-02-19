@@ -171,7 +171,7 @@ class DikidiParser:
         self.login_password = Config.DIKIDI_LOGIN_PASSWORD
         self._journal_list_base = getattr(
             Config, "DIKIDI_JOURNAL_LIST_BASE",
-            "https://dikidi.ru/ru/owner/journal/?company=1993359&view=list&limit=50&period=week"
+            "https://dikidi.ru/ru/owner/journal/?company=1993359&view=list&start=2026-02-01&end=2026-02-28&limit=50&period=month"
         )
 
     def _journal_list_url(self, start_date: datetime = None, end_date: datetime = None) -> str:
@@ -787,14 +787,21 @@ class DikidiParser:
         parsed_appointments = await self.parse_appointments(session)
         
         stats = {"created": 0, "changed": 0, "canceled": 0}
-        
-        # Получаем все существующие записи. Ключ: (user_id, date, time, event) — чтобы
-        # не терять несколько услуг в одном слоте (маникюр+дизайн и т.п.)
+
+        def _norm(s: str) -> str:
+            return (s or "").strip()
+
+        def _canon_key(uid: int, d: str, t: str, ev: str) -> tuple:
+            """Нормализованный ключ: избегаем дубликатов при разном формате даты/пробелах."""
+            return (uid, _normalize_date(_norm(d)) or _norm(d), _norm(t), _norm(ev))
+
+        # Получаем все существующие записи. Ключ нормализован — чтобы избежать дубликатов
+        # при разном формате даты (09.02 vs 9.02) или пробелах.
         result = await session.execute(select(Appointment))
         existing_appointments = {}
         next_dikidi_id = 1
         for app in result.scalars().all():
-            key = (app.user_id, app.date, app.time, app.event or "")
+            key = _canon_key(app.user_id, app.date or "", app.time or "", app.event or "")
             existing_appointments[key] = app
             if app.dikidi_id is not None and app.dikidi_id >= next_dikidi_id:
                 next_dikidi_id = app.dikidi_id + 1
@@ -829,15 +836,11 @@ class DikidiParser:
         company = result.scalar_one_or_none()
 
         if not company:
-            company = Company(name=Config.COMPANY_NAME, address="Томск")
+            company = Company(name=Config.COMPANY_NAME, address=Config.COMPANY_ADDRESS)
             session.add(company)
             await session.flush()
 
-        parsed_keys = set()  # (user_id, date, time, event) записей из парсера
-
-        def _norm(s: str) -> str:
-            """Нормализация для сравнения: strip, None/пусто — эквивалентны."""
-            return (s or "").strip()
+        parsed_keys = set()
 
         def _same(new_val, old_val, normalize_date: bool = False) -> bool:
             n = _norm(new_val)
@@ -856,30 +859,37 @@ class DikidiParser:
                 # Пропускаем — пользователь ещё не зарегистрирован в боте. Привязка при /start.
                 continue
             event = app_data.get("event") or "Услуга"
-            key = (user.id, app_data["date"], app_data["time"], event)
+            key = _canon_key(user.id, app_data["date"], app_data["time"], event)
             parsed_keys.add(key)
             existing_app = existing_appointments.get(key)
             visit_status = app_data.get("visit_status") or ""
 
             if existing_app:
-                # Обновляем в БД только при реальном изменении любых полей
-                changed = (
-                    not _same(app_data["event"], existing_app.event) or
-                    not _same(app_data["date"], existing_app.date, normalize_date=True) or
-                    not _same(app_data["time"], existing_app.time) or
-                    not _same(app_data["master"], existing_app.master) or
-                    not _same(visit_status, existing_app.visit_status) or
-                    not _same(app_data.get("clientlink"), existing_app.clientlink)
-                )
-                if changed:
-                    existing_app.event = app_data["event"]
-                    existing_app.date = app_data["date"]
-                    existing_app.time = app_data["time"]
-                    existing_app.master = app_data["master"]
-                    existing_app.clientlink = app_data.get("clientlink") or existing_app.clientlink
-                    existing_app.visit_status = visit_status
-                    existing_app.status = "changed"
-                    stats["changed"] += 1
+                old_visit_status = (existing_app.visit_status or "").strip().lower()
+                new_visit_status = (visit_status or "").strip().lower()
+
+                # Обновляем поля в БД
+                existing_app.event = app_data["event"]
+                existing_app.date = app_data["date"]
+                existing_app.time = app_data["time"]
+                existing_app.master = app_data["master"]
+                existing_app.clientlink = app_data.get("clientlink") or existing_app.clientlink
+                existing_app.visit_status = visit_status
+
+                # Отмена — когда в Dikidi запись помечена «отменена/отменено»
+                is_canceled = "отменена" in new_visit_status or "отменено" in new_visit_status
+                if is_canceled and existing_app.status != "canceled":
+                    existing_app.status = "canceled"
+                    stats["canceled"] += 1
+                # Уведомление «изменено» — ТОЛЬКО когда визит стал «завершён» (и не отменён)
+                elif not is_canceled:
+                    visit_just_completed = (
+                        ("завершен" in new_visit_status or "завершён" in new_visit_status)
+                        and not ("завершен" in old_visit_status or "завершён" in old_visit_status)
+                    )
+                    if visit_just_completed:
+                        existing_app.status = "changed"
+                        stats["changed"] += 1
             else:
                 new_appointment = Appointment(
                     dikidi_id=next_dikidi_id,
@@ -894,14 +904,38 @@ class DikidiParser:
                     status="created",
                 )
                 session.add(new_appointment)
+                await session.flush()
+                existing_appointments[key] = new_appointment  # чтобы не дублировать в рамках этой синхронизации
                 next_dikidi_id += 1
                 stats["created"] += 1
 
-        # Помечаем как отменённые записи, которых нет в распарсенных
+        # Помечаем как отменённые ТОЛЬКО записи в диапазоне парсинга (1 нед назад + 3 нед вперёд)
+        today = datetime.now().date()
+        week_start = today - timedelta(days=today.weekday())
+        parse_min = (week_start - timedelta(days=7))
+        parse_max = (week_start + timedelta(days=6 + 14))
+
+        def _date_in_range(date_str: str) -> bool:
+            if not date_str:
+                return False
+            try:
+                d = _normalize_date(date_str)
+                if not d:
+                    return False
+                parts = d.split(".")
+                if len(parts) != 3:
+                    return False
+                day, mon, year = int(parts[0]), int(parts[1]), int(parts[2])
+                app_date = datetime(year, mon, day).date()
+                return parse_min <= app_date <= parse_max
+            except Exception:
+                return False
+
         for key, appointment in existing_appointments.items():
             if key not in parsed_keys and appointment.status != "canceled":
-                appointment.status = "canceled"
-                stats["canceled"] += 1
+                if _date_in_range(appointment.date or ""):
+                    appointment.status = "canceled"
+                    stats["canceled"] += 1
         
         await session.commit()
         return stats

@@ -1,0 +1,32 @@
+{
+  "timestamp": "2026-02-06T15:49:17",
+  "journal_url": "https://dikidi.ru/ru/owner/journal/?company=1993359",
+  "company_id": "1993359",
+  "count": 2,
+  "appointments": [
+    {
+      "dikidi_id": "03.02.26_18:35_+79628074102_1",
+      "client_name": "Петрова Екатерина",
+      "phone": "+79628074102",
+      "day_of_week": "Вс,",
+      "date": "03.02.26",
+      "time": "18:35",
+      "duration": "2 часа",
+      "master": "Петрова Екатерина",
+      "event": "Маникюр с дизайном",
+      "clientlink": "https://dikidi.ru/ru/owner/journal/?company=1993359"
+    },
+    {
+      "dikidi_id": "03.02.26_18:35_+79628074102_4",
+      "client_name": "Петрова Екатерина",
+      "phone": "+79628074102",
+      "day_of_week": "Вс,",
+      "date": "03.02.26",
+      "time": "18:35",
+      "duration": "2 часа",
+      "master": "Петрова Екатерина",
+      "event": "Маникюр с дизайном",
+      "clientlink": "https://dikidi.ru/ru/owner/journal/?company=1993359"
+    }
+  ]
+}

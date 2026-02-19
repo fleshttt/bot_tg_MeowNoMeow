@@ -6,8 +6,10 @@ load_dotenv()
 class Config:
     # Салон / компания
     COMPANY_NAME = os.getenv("COMPANY_NAME", "MeowNoMeow")
+    COMPANY_ADDRESS = os.getenv("COMPANY_ADDRESS", "г.Томск, ул.Фрунзе 11Б")
     
-    # Ссылки для отзывов (after_visit). Можно переопределить через .env
+    # Ссылки
+    BOOKING_URL = os.getenv("BOOKING_URL", "https://dikidi.net/1993359")
     YANDEX_REVIEW_URL = os.getenv("YANDEX_REVIEW_URL", "https://yandex.ru/maps/org/meownomeow/229631800295/")
     VK_GROUP_URL = os.getenv("VK_GROUP_URL", "https://vk.ru/meownomeow_tsk")
     
