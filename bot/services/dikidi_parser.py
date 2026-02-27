@@ -175,25 +175,12 @@ class DikidiParser:
         )
 
     def _journal_list_url(self, start_date: datetime = None, end_date: datetime = None) -> str:
-        """URL журнала view=list. Если заданы DIKIDI_JOURNAL_START/END — используем их.
-        Иначе: 1 неделя назад от начала текущей недели и 3 недели вперёд (полный охват)."""
-        start_s = getattr(Config, "DIKIDI_JOURNAL_START", "").strip()
-        end_s = getattr(Config, "DIKIDI_JOURNAL_END", "").strip()
-        if start_s and end_s:
-            pass
-        elif start_date is not None and end_date is not None:
-            start_s = start_date.strftime("%Y-%m-%d")
-            end_s = end_date.strftime("%Y-%m-%d")
-        else:
-            today = datetime.now().date()
-            week_start = today - timedelta(days=today.weekday())
-            # 1 неделя назад и 3 недели вперёд (охват ~4 недель)
-            start_date = week_start - timedelta(days=7)
-            end_date = week_start + timedelta(days=6 + 21)
-            start_s = start_date.strftime("%Y-%m-%d")
-            end_s = end_date.strftime("%Y-%m-%d")
-        base = self._journal_list_base.rstrip("&")
-        return f"{base}&start={start_s}&end={end_s}"
+        """
+        URL журнала view=list ДЛЯ РАБОЧЕГО ПАРСЕРА.
+        Для единообразия с тестовым скриптом всегда открываем фиксированный месяц:
+        https://dikidi.ru/ru/owner/journal/?company=1993359&view=list&start=2026-02-01&end=2026-02-28&limit=50&period=month
+        """
+        return "https://dikidi.ru/ru/owner/journal/?company=1993359&view=list&start=2026-02-01&end=2026-02-28&limit=50&period=month"
 
     def _normalize_phone_for_input(self) -> tuple:
         """Возвращает (номер для поля: 7XXXXXXXXXX, начинается_ли_с_7). По записи рекордера в поле вводят 79526834874."""
@@ -207,31 +194,35 @@ class DikidiParser:
 
     async def _login(self, page: Page) -> bool:
         """
-        Вход по алгоритму из recorder:
-        open / → click a>.hidden-xs (Вход/Регистрация) → click "По номеру телефона" →
-        type .bootbox-body #number → type name=password → sendKeys Enter
+        Авторизация по сценарию тест-кейса:
+        1) open https://dikidi.ru/
+        2) клик по «Вход / Регистрация»
+        3) выбор «По номеру телефона»
+        4) ввод номера и пароля
+        5) отправка формы
         """
         try:
             print("Переход на https://dikidi.ru/ ...")
             await page.goto("https://dikidi.ru/", wait_until="domcontentloaded", timeout=20000)
-            await page.wait_for_timeout(1200)
+            await page.wait_for_timeout(1000)
 
-            # Recorder: click css=a > .hidden-xs (Вход / Регистрация)
+            # 1. Кнопка «Вход / Регистрация»
             print("Клик по Вход / Регистрация...")
-            login_selectors = [
-                "css=a > .hidden-xs",
+            login_locators = [
+                "xpath=//div[@id='root-container']/div/div/ul/li[3]/a/span",
+                "li.authorization > a",
+                "css=span.hidden-xs",
                 "a:has(span.hidden-xs)",
                 "text=Вход / Регистрация",
                 "text=Вход/регистрация",
                 "text=Вход",
-                "a[href*='login']",
             ]
             login_clicked = False
-            for selector in login_selectors:
+            for selector in login_locators:
                 try:
-                    btn = await page.wait_for_selector(selector, timeout=3000)
-                    if btn and await btn.is_visible():
-                        await btn.click()
+                    el = await page.wait_for_selector(selector, timeout=4000)
+                    if el and await el.is_visible():
+                        await el.click()
                         login_clicked = True
                         print(f"Кнопка входа найдена: {selector}")
                         break
@@ -239,57 +230,68 @@ class DikidiParser:
                     continue
             if not login_clicked:
                 print("Кнопка входа не найдена, продолжаем...")
-            await page.wait_for_timeout(1000)
-
-            try:
-                await page.wait_for_selector("div.bootbox.modal, .bootbox-body", timeout=5000, state="visible")
-                print("Модальное окно авторизации открыто")
-            except Exception:
-                pass
             await page.wait_for_timeout(800)
 
-            # Recorder: click linkText=По номеру телефона (альт: css=.bootbox-body .number > .btn)
+            # Ждём модальное окно авторизации
+            try:
+                await page.wait_for_selector("div.bootbox.modal, .bootbox-body", timeout=8000, state="visible")
+                print("Модальное окно авторизации открыто")
+            except Exception:
+                print("Модальное окно авторизации не найдено, продолжаем...")
+            await page.wait_for_timeout(500)
+
+            # 2. Вкладка «По номеру телефона»
             print("Клик «По номеру телефона»...")
-            phone_tab_selectors = [
+            phone_tab_locators = [
+                "css=div.bootbox-body > div.container.base > div.form-group.text-center.number > a.btn.btn-default.phone-btn",
                 "css=.bootbox-body .number > .btn",
                 "a:has-text('По номеру телефона')",
                 "text=По номеру телефона",
-                "link=По номеру телефона",
-                "a.btn.btn-default.phone-btn",
                 "text=По номеру",
             ]
             phone_tab_clicked = False
-            for selector in phone_tab_selectors:
+            for selector in phone_tab_locators:
                 try:
-                    el = await page.wait_for_selector(selector, timeout=2000)
+                    el = await page.wait_for_selector(selector, timeout=4000)
                     if el and await el.is_visible():
                         await el.click()
                         phone_tab_clicked = True
                         print(f"Выбран вход по номеру: {selector}")
-                        await page.wait_for_timeout(800)
                         break
                 except Exception:
                     continue
-            if not phone_tab_clicked:
-                for el in await page.query_selector_all(".bootbox-body a, .bootbox-body .btn"):
-                    try:
-                        t = await el.inner_text()
-                        if t and "номер" in t.lower():
-                            if await el.is_visible():
-                                await el.click()
-                                phone_tab_clicked = True
-                                await page.wait_for_timeout(800)
-                                break
-                    except Exception:
-                        continue
-            if not phone_tab_clicked:
-                print("Вкладка «По номеру» не найдена, продолжаем...")
-            await page.wait_for_timeout(600)
+            await page.wait_for_timeout(500)
 
-            # Recorder: type css=.bootbox-body #number value 79526834874
+            # 2.1. Выбор страны Russia (если есть дропдаун с флагами)
+            try:
+                country_btn = await page.query_selector(
+                    "div.input-group-btn > button.btn.btn-default.dropdown-toggle"
+                )
+                if country_btn and await country_btn.is_visible():
+                    await country_btn.click()
+                    await page.wait_for_timeout(300)
+                    # Пытаемся выбрать Россию
+                    for sel in [
+                        "text=Россия",
+                        "li a:has-text('Россия')",
+                        "ul.dropdown-menu li:nth-child(63) a",  # как в тест-кейсе
+                    ]:
+                        try:
+                            opt = await page.query_selector(sel)
+                            if opt and await opt.is_visible():
+                                await opt.click()
+                                print("Страна выбрана: Россия")
+                                break
+                        except Exception:
+                            continue
+            except Exception:
+                pass
+
+            # 3. Ввод номера телефона
             phone_digits, _ = self._normalize_phone_for_input()
-            print("Ввод номера телефона...")
-            phone_input_selectors = [
+            print(f"Ввод номера телефона {phone_digits}...")
+            phone_input_locators = [
+                "css=div.bootbox-body > div.container.auth > form > div.form-group > div.input-group.input-phone.f16 > #number",
                 "css=.bootbox-body #number",
                 ".bootbox-body input#number",
                 "input#number",
@@ -297,7 +299,7 @@ class DikidiParser:
                 "input[type='tel']",
             ]
             phone_entered = False
-            for selector in phone_input_selectors:
+            for selector in phone_input_locators:
                 try:
                     phone_input = await page.wait_for_selector(selector, timeout=5000)
                     if phone_input:
@@ -307,35 +309,47 @@ class DikidiParser:
                         await phone_input.fill("")
                         await phone_input.fill(phone_digits)
                         phone_entered = True
-                        print(f"Номер введён: {phone_digits}")
+                        print(f"Номер введён через селектор: {selector}")
                         break
                 except Exception:
                     continue
             if not phone_entered:
                 raise Exception("Поле номера телефона не найдено")
 
-            # Recorder: type name=password, затем sendKeys KEY_ENTER
-            print("Ожидание поля пароля...")
-            await page.wait_for_selector("input[name='password']", timeout=15000, state="visible")
-            await page.wait_for_timeout(500)
+            # 4. Ввод пароля
             print("Ввод пароля...")
             password_input = await page.query_selector("input[name='password']")
             if not password_input:
-                password_input = await page.wait_for_selector("input[type='password']", timeout=3000)
+                password_input = await page.wait_for_selector("input[type='password']", timeout=8000)
             if password_input:
                 await password_input.click()
                 await password_input.fill(self.login_password)
                 print("Пароль введён")
             else:
                 raise Exception("Поле пароля не найдено")
-            await page.wait_for_timeout(500)
-            # Recorder: click css=.bootbox-body form > .form-group > .btn (кнопка отправки)
-            submit_btn = await page.query_selector("css=.bootbox-body form > .form-group > .btn")
-            if submit_btn and await submit_btn.is_visible():
-                await submit_btn.click()
-            else:
-                await page.keyboard.press("Enter")
 
+            # 5. Отправка формы
+            submit_locators = [
+                "css=div.bootbox-body > div.container.auth > form > div.form-group.footer > button.btn.btn-auth.btn-dikidi",
+                "css=.bootbox-body form > .form-group > .btn",
+                "css=.bootbox-body button.btn-auth",
+            ]
+            submitted = False
+            for selector in submit_locators:
+                try:
+                    submit_btn = await page.query_selector(selector)
+                    if submit_btn and await submit_btn.is_visible():
+                        await submit_btn.click()
+                        submitted = True
+                        print(f"Нажата кнопка входа: {selector}")
+                        break
+                except Exception:
+                    continue
+            if not submitted:
+                await page.keyboard.press("Enter")
+                print("Отправка формы клавишей Enter")
+
+            # Ожидаем завершения авторизации
             print("Ожидание завершения авторизации...")
             await page.wait_for_timeout(2500)
             current_url = page.url
@@ -348,7 +362,10 @@ class DikidiParser:
 
         except Exception as e:
             print(f"Ошибка при авторизации: {e}")
-            await page.screenshot(path="login_error.png")
+            try:
+                await page.screenshot(path="login_error.png")
+            except Exception:
+                pass
             return False
     
     async def parse_appointments(self, session: AsyncSession) -> List[Dict]:
@@ -382,18 +399,32 @@ class DikidiParser:
                 except Exception:
                     pass
 
-                # Парсим по неделям — 1 нед. назад + 2 нед. вперёд (оптимально по скорости)
-                today = datetime.now().date()
-                week_start = today - timedelta(days=today.weekday())
-                start_date = week_start - timedelta(days=7)
-                end_date = week_start + timedelta(days=6 + 14)
+                # Сначала парсим фиксированный месяц (как в тесте), затем один раз
+                # нажимаем кнопку "следующий период" календаря и парсим ещё раз.
                 all_seen = set()
-                week = start_date
-                while week <= end_date:
-                    week_end = week + timedelta(days=6)
-                    list_url = self._journal_list_url(week, week_end)
-                    print(f"Переход на журнал: {list_url}")
-                    await page.goto(list_url, wait_until="domcontentloaded", timeout=20000)
+
+                for step in range(2):
+                    if step == 0:
+                        # Первый проход — открываем URL журнала (фиксированный месяц)
+                        list_url = self._journal_list_url()
+                        print(f"Переход на журнал: {list_url}")
+                        await page.goto(list_url, wait_until="domcontentloaded", timeout=20000)
+                    else:
+                        # Второй проход — нажимаем кнопку "следующий период" (один раз)
+                        try:
+                            next_btn = await page.query_selector(
+                                "button.journal458-calendar-next.btn.btn-default, "
+                                ".journal458-calendar-next.btn.btn-default"
+                            )
+                            if not next_btn or not await next_btn.is_visible():
+                                print("Кнопка перехода на следующий период не найдена, выходим из цикла.")
+                                break
+                            await next_btn.click()
+                            print("Нажата кнопка «следующий период» календаря")
+                        except Exception as e:
+                            print(f"Ошибка при нажатии кнопки следующего периода: {e}")
+                            break
+
                     await page.wait_for_timeout(1200)
 
                     list_selectors = [
@@ -410,10 +441,10 @@ class DikidiParser:
                             continue
                     await page.wait_for_timeout(800)
 
-                    week_apps = await self._parse_list_appointments(page, all_seen)
-                    for a in week_apps:
+                    month_apps = await self._parse_list_appointments(page, all_seen)
+                    for a in month_apps:
                         appointments.append(a)
-                    week = week_end + timedelta(days=1)
+
                 print(f"Всего найдено записей: {len(appointments)}")
                 
             except Exception as e:
@@ -427,39 +458,62 @@ class DikidiParser:
     async def _parse_list_appointments(self, page: Page, seen: set = None) -> List[Dict]:
         """
         Парсит записи из view=list. seen — множество ключей для дедупликации между неделями.
+        Если есть кнопка «Показать ещё» (.journal458-buttons .btn-more), нажимает её и читает дальше (цикл).
         """
         appointments = []
         seen = seen if seen is not None else set()
+        max_load_more = 50  # защита от бесконечного цикла
+        load_more_count = 0
         try:
-            rows = await page.query_selector_all(".journal458-row")
-            if not rows:
-                rows = await page.query_selector_all(".journal458-record")
-            if not rows:
-                for sel in ["[class*='journal458']", ".record", "div[class*='record']"]:
-                    els = await page.query_selector_all(sel)
-                    if els:
-                        rows = els
-                        break
-            print(f"Строк в этой неделе: {len(rows)}")
-            for idx, row in enumerate(rows):
+            while True:
+                rows = await page.query_selector_all(".journal458-row")
+                if not rows:
+                    rows = await page.query_selector_all(".journal458-record")
+                if not rows:
+                    for sel in ["[class*='journal458']", ".record", "div[class*='record']"]:
+                        els = await page.query_selector_all(sel)
+                        if els:
+                            rows = els
+                            break
+                if load_more_count == 0:
+                    print(f"Строк в этой неделе: {len(rows)}")
+                for idx, row in enumerate(rows):
+                    try:
+                        data = await self._extract_list_record_data(row, page, idx)
+                        if not data:
+                            continue
+                        key = (
+                            data.get("date") or "",
+                            data.get("time") or "",
+                            data.get("phone") or "",
+                            data.get("event") or "Услуга",
+                        )
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        appointments.append(data)
+                        print(f"Запись {len(appointments)}: {data.get('master', '')} — {data.get('time', '')} {data.get('client_name', '') or data.get('phone', '')}")
+                    except Exception as e:
+                        print(f"Ошибка парсинга строки {idx + 1}: {e}")
+
+                # Кнопка «Показать ещё»: .journal458-buttons .btn-more
+                btn = await page.query_selector(".journal458-buttons .btn-more, .journal458-buttons button.btn-more")
+                if not btn or load_more_count >= max_load_more:
+                    break
                 try:
-                    data = await self._extract_list_record_data(row, page, idx)
-                    if not data:
-                        continue
-                    # Уникальность: date + time + phone + event (разные услуги в одном слоте)
-                    key = (
-                        data.get("date") or "",
-                        data.get("time") or "",
-                        data.get("phone") or "",
-                        data.get("event") or "Услуга",
-                    )
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    appointments.append(data)
-                    print(f"Запись {len(appointments)}: {data.get('master', '')} — {data.get('time', '')} {data.get('client_name', '') or data.get('phone', '')}")
+                    visible = await btn.is_visible()
+                except Exception:
+                    visible = False
+                if not visible:
+                    break
+                try:
+                    await btn.click(timeout=5000)
+                    load_more_count += 1
+                    print(f"Нажато «Показать ещё» ({load_more_count})")
+                    await page.wait_for_timeout(1200)  # ждём подгрузки записей
                 except Exception as e:
-                    print(f"Ошибка парсинга строки {idx + 1}: {e}")
+                    print(f"Ошибка при нажатии «Показать ещё»: {e}")
+                    break
         except Exception as e:
             print(f"Ошибка парсинга списка: {e}")
         return appointments
